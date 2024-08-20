@@ -1,0 +1,373 @@
+diff --git a/dist/module.d.mts b/dist/module.d.mts
+index 524a1d76c762546d86711d8cd02fc55807f7c024..30d7d3de42052592ea9683dd219d19b8ba62f266 100644
+--- a/dist/module.d.mts
++++ b/dist/module.d.mts
+@@ -124,7 +124,7 @@ interface NuxtIconRuntimeOptions {
+ }
+ 
+ type IconifyIconCustomizeCallback = (content: string, name?: string, prefix?: string, provider?: string) => string;
+-interface ModuleOptions extends Partial<NuxtIconRuntimeOptions> {
++interface ModuleOptions extends Partial<Omit<NuxtIconRuntimeOptions, 'customize'>> {
+     /**
+      * Name of the component to be registered
+      * @default 'Icon'
+diff --git a/dist/module.d.ts b/dist/module.d.ts
+index 524a1d76c762546d86711d8cd02fc55807f7c024..30d7d3de42052592ea9683dd219d19b8ba62f266 100644
+--- a/dist/module.d.ts
++++ b/dist/module.d.ts
+@@ -124,7 +124,7 @@ interface NuxtIconRuntimeOptions {
+ }
+ 
+ type IconifyIconCustomizeCallback = (content: string, name?: string, prefix?: string, provider?: string) => string;
+-interface ModuleOptions extends Partial<NuxtIconRuntimeOptions> {
++interface ModuleOptions extends Partial<Omit<NuxtIconRuntimeOptions, 'customize'>> {
+     /**
+      * Name of the component to be registered
+      * @default 'Icon'
+diff --git a/dist/module.json b/dist/module.json
+index b756f836942b6aeea328c229df004133b80cb4c1..b11535f9d93404ad5b03aa34a86996ef439cbed8 100644
+--- a/dist/module.json
++++ b/dist/module.json
+@@ -4,7 +4,7 @@
+   "compatibility": {
+     "nuxt": ">=3.0.0"
+   },
+-  "version": "1.4.5",
++  "version": "1.4.6",
+   "builder": {
+     "@nuxt/module-builder": "0.8.1",
+     "unbuild": "2.0.0"
+diff --git a/dist/module.mjs b/dist/module.mjs
+index 2f135323a53b0d5c37ac76be084b4aaea71513aa..e54d9f55501cabd25eec59c5987e773f2e03ba0d 100644
+--- a/dist/module.mjs
++++ b/dist/module.mjs
+@@ -6,6 +6,7 @@ import fs from 'node:fs/promises';
+ import fg from 'fast-glob';
+ import { convertParsedSVG, parseSVGContent } from '@iconify/utils/lib/svg/parse';
+ import { isPackageExists } from 'local-pkg';
++import { provider } from 'std-env';
+ 
+ 
+ 
+@@ -436,12 +437,11 @@ async function discoverInstalledCollections() {
+ 
+ function registerServerBundle(ctx) {
+   const { nuxt } = ctx;
+-  const bundle = ctx.resolveServerBundle();
+   const templateServer = addTemplate({
+     filename: "nuxt-icon-server-bundle.mjs",
+     write: true,
+     async getContents() {
+-      const { collections, remote } = await bundle;
++      const { collections, remote } = await ctx.resolveServerBundle();
+       nuxt.options.appConfig.icon ||= {};
+       const appIcons = nuxt.options.appConfig.icon;
+       appIcons.collections ||= [];
+@@ -507,60 +507,35 @@ function registerServerBundle(ctx) {
+ }
+ 
+ function registerClientBundle(ctx) {
+-  const iconifyCollectionMap = /* @__PURE__ */ new Map();
+-  const {
+-    includeCustomCollections = ctx.options.provider !== "server"
+-  } = ctx.options.clientBundle || {};
+   addTemplate({
+     filename: "nuxt-icon-client-bundle.mjs",
+     write: true,
+     async getContents() {
+-      const icons = [...ctx.options.clientBundle?.icons || []];
+-      let customCollections = [];
+-      if (includeCustomCollections && ctx.options.customCollections?.length) {
+-        customCollections = await ctx.loadCustomCollection();
++      const { collections, failed } = await ctx.loadClientBundleCollections();
++      if (failed.length) {
++        const msg = `Nuxt Icon could not fetch the icon data for:
++${failed.map((f) => " - " + f).join("\n")}`;
++        if (ctx.nuxt.options._build)
++          throw new Error(msg);
++        else
++          logger.warn(msg);
+       }
+-      if (!icons.length && !customCollections.length)
++      if (!collections.length)
+         return "export function init() {}";
+-      const { getIconData } = await import('@iconify/utils');
+-      const { loadCollectionFromFS } = await import('@iconify/utils/lib/loader/fs');
+-      const lines = [];
+-      lines.push(
+-        'import { addIcon } from "@iconify/vue"',
++      const collectionsRaw = JSON.stringify([...collections.values()], null, 2);
++      return [
++        'import { addCollection } from "@iconify/vue"',
+         "let _initialized = false",
+         "export function init() {",
+         "  if (_initialized)",
+-        "    return"
+-      );
+-      lines.push(
+-        ...await Promise.all(icons.map(async (icon) => {
+-          const [prefix, name] = icon.split(":");
+-          if (!iconifyCollectionMap.has(prefix))
+-            iconifyCollectionMap.set(prefix, loadCollectionFromFS(prefix));
+-          let data = null;
+-          const collection = await iconifyCollectionMap.get(prefix);
+-          if (collection)
+-            data = getIconData(collection, name);
+-          if (!data) {
+-            logger.error(`Nuxt Icon could not fetch the icon data for \`${icon}\``);
+-            return `  /* ${icon} failed to load */`;
+-          }
+-          return `  addIcon('${icon}', ${JSON.stringify(data)})`;
+-        }))
+-      );
+-      if (customCollections.length) {
+-        lines.push(
+-          "  // ===== Custom collections =====",
+-          ...customCollections.flatMap((collection) => Object.entries(collection.icons).map(([name, data]) => {
+-            return `  addIcon('${collection.prefix}:${name}', ${JSON.stringify(data)})`;
+-          }))
+-        );
+-      }
+-      lines.push(
++        "    return",
++        `  const collections = ${collectionsRaw}`,
++        `  for (const collection of collections) {`,
++        "    addCollection(collection)",
++        "  }",
+         "  _initialized = true",
+         "}"
+-      );
+-      return lines.join("\n");
++      ].join("\n");
+     }
+   });
+ }
+@@ -574,20 +549,17 @@ class NuxtIconModuleContext {
+   constructor(nuxt, options) {
+     this.nuxt = nuxt;
+     this.options = options;
+-    if (options.serverBundle === "auto") {
+-      this.serverBundle = nuxt.options.dev ? "local" : KEYWORDS_EDGE_TARGETS.some(
+-        (word) => typeof nuxt.options.nitro.preset === "string" && nuxt.options.nitro.preset.includes(word) || process.env.NITRO_PRESET?.includes(word) || process.env.SERVER_PRESET?.includes(word)
+-      ) ? "remote" : "local";
+-    } else {
+-      this.serverBundle = options.serverBundle;
+-    }
+   }
+-  serverBundle;
+   getRuntimeCollections(runtimeOptions) {
+-    return runtimeOptions.fallbackToApi ? collectionNames : typeof this.serverBundle === "string" ? collectionNames : this.serverBundle ? this.serverBundle.collections?.map((c) => typeof c === "string" ? c : c.prefix) || [] : [];
++    return runtimeOptions.fallbackToApi ? collectionNames : typeof this.options.serverBundle === "string" ? collectionNames : this.options.serverBundle ? this.options.serverBundle.collections?.map((c) => typeof c === "string" ? c : c.prefix) || [] : [];
+   }
+   _customCollections;
+   _serverBundle;
++  _nitroPreset;
++  setNitroPreset(preset) {
++    console.log({ setNitroPreset: preset });
++    this._nitroPreset = preset || this._nitroPreset;
++  }
+   async resolveServerBundle() {
+     if (!this._serverBundle) {
+       this._serverBundle = this._resolveServerBundle().then((bundle) => {
+@@ -599,7 +571,18 @@ class NuxtIconModuleContext {
+     return this._serverBundle;
+   }
+   async _resolveServerBundle() {
+-    const resolved = !this.serverBundle || this.options.provider !== "server" ? { disabled: true } : typeof this.serverBundle === "string" ? { remote: this.serverBundle === "remote" } : this.serverBundle;
++    let serverBundle = this.options.serverBundle;
++    if (serverBundle === "auto") {
++      const preset = this._nitroPreset || (typeof this.nuxt.options.nitro.preset === "string" ? this.nuxt.options.nitro.preset || provider : provider);
++      console.log("preset", preset);
++      serverBundle = "local";
++      if (!this.nuxt.options.dev && KEYWORDS_EDGE_TARGETS.some(
++        (word) => typeof preset === "string" && preset.includes(word) || process.env.NITRO_PRESET?.includes(word) || process.env.SERVER_PRESET?.includes(word)
++      ))
++        serverBundle = "remote";
++      logger.info(`Nuxt Icon server bundle mode is set to \`${serverBundle}\``);
++    }
++    const resolved = !serverBundle || this.options.provider !== "server" ? { disabled: true } : typeof serverBundle === "string" ? { remote: serverBundle === "remote" } : serverBundle;
+     if (resolved.disabled) {
+       return {
+         disabled: true,
+@@ -641,6 +624,65 @@ class NuxtIconModuleContext {
+       (this.options.customCollections || []).map((collection) => loadCustomCollection(collection, this.nuxt))
+     );
+   }
++  async loadClientBundleCollections() {
++    const {
++      includeCustomCollections = this.options.provider !== "server"
++    } = this.options.clientBundle || {};
++    const icons = [...this.options.clientBundle?.icons || []];
++    let customCollections = [];
++    if (includeCustomCollections && this.options.customCollections?.length) {
++      customCollections = await this.loadCustomCollection();
++    }
++    if (!icons.length && !customCollections.length) {
++      return {
++        collections: [],
++        failed: []
++      };
++    }
++    const iconifyCollectionMap = /* @__PURE__ */ new Map();
++    const { getIconData } = await import('@iconify/utils');
++    const { loadCollectionFromFS } = await import('@iconify/utils/lib/loader/fs');
++    const collections = /* @__PURE__ */ new Map();
++    function addIcon(prefix, name, data) {
++      let collection = collections.get(prefix);
++      if (!collection) {
++        collection = {
++          prefix,
++          icons: {}
++        };
++        collections.set(prefix, collection);
++      }
++      collection.icons[name] = data;
++    }
++    const failed = [];
++    await Promise.all(icons.map(async (icon) => {
++      try {
++        const [prefix, name] = icon.split(":");
++        if (!iconifyCollectionMap.has(prefix))
++          iconifyCollectionMap.set(prefix, loadCollectionFromFS(prefix));
++        let data = null;
++        const collection = await iconifyCollectionMap.get(prefix);
++        if (collection)
++          data = getIconData(collection, name);
++        if (!data)
++          failed.push(icon);
++        else
++          addIcon(prefix, name, data);
++      } catch (e) {
++        console.error(e);
++        failed.push(icon);
++      }
++    }));
++    if (customCollections.length) {
++      customCollections.flatMap((collection) => Object.entries(collection.icons).map(([name, data]) => {
++        addIcon(collection.prefix, name, data);
++      }));
++    }
++    return {
++      collections: [...collections.values()],
++      failed
++    };
++  }
+ }
+ 
+ const module = defineNuxtModule({
+@@ -672,17 +714,17 @@ const module = defineNuxtModule({
+     cssLayer: schema["cssLayer"].$default,
+     mode: schema["mode"].$default,
+     attrs: schema["attrs"].$default,
+-    collections: schema["collections"].$default,
+-    customize: schema["customize"].$default
++    collections: schema["collections"].$default
+   },
+   async setup(options, nuxt) {
+     const resolver = createResolver(import.meta.url);
++    if (typeof options.customize === "function") {
++      throw new TypeError("`customize` callback can't not be set in module options, use `app.config.ts` or component props instead.");
++    }
+     if (!options.provider) {
+       options.provider = !nuxt.options.ssr || nuxt.options._generate ? "iconify" : "server";
+     }
+     const ctx = new NuxtIconModuleContext(nuxt, options);
+-    if (options.serverBundle === "auto")
+-      logger.info(`Nuxt Icon server bundle mode is set to \`${ctx.serverBundle}\``);
+     addPlugin(
+       resolver.resolve("./runtime/plugin")
+     );
+@@ -713,6 +755,7 @@ const module = defineNuxtModule({
+       });
+     });
+     nuxt.hook("nitro:config", async (nitroConfig) => {
++      ctx.setNitroPreset(nitroConfig.preset);
+       const bundle = await ctx.resolveServerBundle();
+       if (bundle.remote || !bundle.externalizeIconsJson)
+         return;
+diff --git a/dist/runtime/components/index.js b/dist/runtime/components/index.js
+index 8594badd6f7a15318f6b7a2b342053a5de41302c..37822a6e83de57f4cdeeabda02ec4cd672b15c14 100644
+--- a/dist/runtime/components/index.js
++++ b/dist/runtime/components/index.js
+@@ -27,22 +27,22 @@ export default defineComponent({
+   },
+   async setup(props, { slots }) {
+     const nuxtApp = useNuxtApp();
+-    const options = useAppConfig().icon;
++    const runtimeOptions = useAppConfig().icon;
+     const name = useResolvedName(() => props.name);
+     const component = computed(
+-      () => nuxtApp.vueApp?.component(name.value) || ((props.mode || options.mode) === "svg" ? NuxtIconSvg : NuxtIconCss)
++      () => nuxtApp.vueApp?.component(name.value) || ((props.mode || runtimeOptions.mode) === "svg" ? NuxtIconSvg : NuxtIconCss)
+     );
+     const style = computed(() => {
+-      const size = props.size || options.size;
++      const size = props.size || runtimeOptions.size;
+       return size ? { fontSize: Number.isNaN(+size) ? size : size + "px" } : null;
+     });
+-    const customize = props.customize || options.customize;
++    const customize = props.customize || runtimeOptions.customize;
+     return () => h(
+       component.value,
+       {
+-        ...options.attrs,
++        ...runtimeOptions.attrs,
+         name: name.value,
+-        class: options.class,
++        class: runtimeOptions.class,
+         style: style.value,
+         customize
+       },
+diff --git a/package.json b/package.json
+index e3df9b9659972eba8740a6b15641867d1a23c439..2f07a5c11d25d60ff78dd594827d3cccdc0dbdcc 100644
+--- a/package.json
++++ b/package.json
+@@ -36,17 +36,27 @@
+     "release": "release-it"
+   },
+   "dependencies": {
+-    "@iconify/collections": "^1.0.443",
+-    "@iconify/types": "^2.0.0",
+-    "@iconify/utils": "^2.1.25",
+-    "@iconify/vue": "4.1.3-beta.1",
+-    "@nuxt/devtools-kit": "^1.3.9",
+-    "@nuxt/kit": "^3.12.4",
+-    "consola": "^3.2.3",
+-    "fast-glob": "^3.3.2",
+-    "local-pkg": "^0.5.0",
+-    "mlly": "^1.7.1",
+-    "pathe": "^1.1.2"
++    "@iconify-json/fluent-emoji-high-contrast": "^1.1.15",
++    "@iconify-json/logos": "^1.1.43",
++    "@iconify-json/ph": "^1.1.13",
++    "@iconify-json/simple-icons": "^1.1.110",
++    "@iconify-json/uil": "^1.1.8",
++    "@nuxt/devtools": "^1.3.9",
++    "@nuxt/eslint-config": "^0.4.0",
++    "@nuxt/module-builder": "^0.8.1",
++    "@nuxt/schema": "^3.12.4",
++    "@nuxt/test-utils": "^3.14.0",
++    "@types/node": "^22.0.0",
++    "@unocss/nuxt": "^0.61.6",
++    "changelogen": "^0.5.5",
++    "eslint": "9.0.0",
++    "nuxt": "^3.12.4",
++    "release-it": "^17.6.0",
++    "typescript": "^5.5.4",
++    "untyped": "^1.4.2",
++    "vite": "^5.3.5",
++    "vue-tsc": "^2.0.29",
++    "prettier": "^3.3.3"
+   },
+   "devDependencies": {
+     "@iconify-json/fluent-emoji-high-contrast": "^1.1.15",
+@@ -68,7 +78,8 @@
+     "typescript": "^5.5.4",
+     "untyped": "^1.4.2",
+     "vite": "^5.3.5",
+-    "vue-tsc": "^2.0.29"
++    "vue-tsc": "^2.0.29",
++    "prettier": "^3.3.3"
+   },
+   "release-it": {
+     "git": {

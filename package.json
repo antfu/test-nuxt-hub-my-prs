@@ -34,6 +34,9 @@
   "pnpm": {
     "overrides": {
       "@nuxt/icon": "1.4.5"
+    },
+    "patchedDependencies": {
+      "@nuxt/icon": "patches/@nuxt__icon.patch"
     }
   }
 }
