@@ -26,8 +26,14 @@
   },
   "devDependencies": {
     "@nuxt/eslint": "^0.5.1",
+    "@nuxt/kit": "^3.12.4",
     "eslint": "^9.9.0",
     "vue-tsc": "^2.0.29",
     "wrangler": "^3.72.0"
+  },
+  "pnpm": {
+    "overrides": {
+      "@nuxt/icon": "1.4.5"
+    }
   }
 }
